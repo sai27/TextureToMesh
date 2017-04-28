@@ -16,131 +16,250 @@ public class Vertice
     public int y;
 }
 
-public class Face
+public class MatrixSubset
 {
-    public Face(int v1, int v2, int v3)
+    public class Item
     {
-        this.v1 = v1;
-        this.v2 = v2;
-        this.v3 = v3;
-    }
-
-    public int v1;
-    public int v2;
-    public int v3;
-}
-
-public enum Channel
-{
-    Zero,
-    Half,
-    One,
-}
-
-public struct Pixel
-{
-    public Channel alpha;
-    public bool cliped;
-}
-
-public class Rectangle
-{
-    public int xMin;
-    public int yMin;
-    public int xMax;
-    public int yMax;
-
-    public Rectangle(int xMin, int yMin, int xMax, int yMax)
-    {
-        this.xMin = xMin;
-        this.yMin = yMin;
-        this.xMax = xMax;
-        this.yMax = yMax;
-    }
-
-    public int Area
-    {
-        get
+        public Item(float value, bool marked)
         {
-            return (xMax - xMin + 1) * (yMax - yMin + 1);
+            this.value = value;
+            this.marked = marked;
+        }
+
+        public float value;
+        public bool marked;
+    }
+
+    public class Quad
+    {
+        public int xMin;
+        public int yMin;
+        public int xMax;
+        public int yMax;
+
+        public Quad(int xMin, int yMin, int xMax, int yMax)
+        {
+            this.xMin = xMin;
+            this.yMin = yMin;
+            this.xMax = xMax;
+            this.yMax = yMax;
+        }
+
+        public int Area { get { return (xMax - xMin + 1) * (yMax - yMin + 1); } }
+    }
+
+    public MatrixSubset(float[] raw, int width, int height, int minQuad)
+    {
+        m_width         = width;
+        m_height        = height;
+        m_rawMatrix     = new Item[height, width];
+        m_idxMatrix     = new int[height, width];
+        m_minQuad       = minQuad;
+        for (int h = 0; h < height; h++)
+        {
+            for (int w = 0; w < width; w++)
+            {
+                var value = raw[h * height + w];
+                var marked = false;
+                if (value < 1.0f)
+                {
+                    marked = true;
+                }
+                var rawItem = new Item(value, marked);
+                m_rawMatrix[h, w] = rawItem;
+                m_idxMatrix[h, w] = 0;
+            }
         }
     }
-        
-}
-public class PixelRaw
-{
-    public PixelRaw(Color[] colors, int width, int height)
-    {
-        m_width = width;
-        m_height = height;
-        m_raws = new Pixel[height, width];
-        m_matrix = new int[height, width];
 
-        for (int i = 0; i < height; i++)
+    public void ComputeQuads()
+    {
+        while (!isAllMarked())
         {
-            for (int j = 0; j < width; j++)
+            ComputeMaxQuad();
+        }
+        DiscardMinimalQuad();
+    }
+
+    private bool isAllMarked()
+    {
+        for (int h = 0; h < m_height; h++)
+        {
+            for (int w = 0; w < m_width; w++)
             {
-                Color c = colors[i * height + j];
-                if (c.a <= 0.05f)
+                if (!m_rawMatrix[h, w].marked)
                 {
-                    m_raws[i, j].cliped = true;
-                    m_raws[i, j].alpha = Channel.Zero;
-                    
+                    return false;
                 }
-                else if (c.a >= 0.95f)
+            }
+        }
+        return true;
+    }
+
+    private void updateIndexMatrix()
+    {
+        for (int h = m_height - 1; h >= 0; h--)
+        {
+            for (int w = 0; w < m_width; w++)
+            {
+                var item = m_rawMatrix[h, w];
+                if (item.marked)
                 {
-                    m_raws[i, j].cliped = false;
-                    m_raws[i, j].alpha = Channel.One;
+                    m_idxMatrix[h, w] = 0;
                 }
                 else
                 {
-                    m_raws[i, j].cliped = false;
-                    m_raws[i, j].alpha = Channel.Half;
+                    if (h < m_height - 1)
+                    {
+                        m_idxMatrix[h, w] = m_idxMatrix[h + 1, w] + 1;
+                    }
+                    else
+                    {
+                        m_idxMatrix[h, w] = 1;
+                    }
                 }
             }
         }
     }
 
-    public void ComputeOpaques()
+    private void updateRawMatrixMarks(Quad quad, bool marked)
     {
-        while (!isComputeOver())
+        for (int h = quad.yMin; h <= quad.yMax; h++)
         {
-            ComputeOpaque();
+            for (int w = quad.xMin; w <= quad.xMax; w++)
+            {
+                m_rawMatrix[h, w].marked = marked;
+            }
         }
-        Debug.Log('a');
     }
 
-    public void WriteObj(string path)
+    private void ComputeMaxQuad()
+    {
+        updateIndexMatrix();
+
+        List<int> row = new List<int>(m_width);
+        Quad maxQuad = null;
+        for (int h = 0; h < m_height; h++)
+        {
+            row.Clear();
+            for (int w = 0; w < m_width; w++)
+            {
+                row.Add(m_idxMatrix[h, w]);
+            }
+            Quad quad = ComputeRowMaxQuad(row, h);
+            if (quad == null)
+                continue;
+
+            if (maxQuad == null)
+            {
+                maxQuad = quad;
+            }
+            else
+            {
+                if (quad.Area > maxQuad.Area)
+                {
+                    maxQuad = quad;
+                }
+            }
+        }
+
+        updateRawMatrixMarks(maxQuad, true);
+        m_quads.Add(maxQuad);
+    }
+
+    private Quad ComputeRowMaxQuad(List<int> row, int yMin)   
+    {
+        Quad quad = null;
+        Stack<int> idxStack = new Stack<int>();
+        row.Add(0);
+        int maxArea = 0 ;
+        for (int i = 0; i < row.Count; )  
+        {
+            if (idxStack.Count == 0 || row[i] > row[idxStack.Peek()])  
+            {
+                idxStack.Push(i);
+                i++;  
+            }  
+            else  
+            {
+                int oldTop = idxStack.Peek();
+                idxStack.Pop();
+                int width = 0;
+                if (idxStack.Count == 0)
+                {
+                    width = i;
+                    int area = row[oldTop] * width;
+                    if (area > maxArea)
+                    {
+                        maxArea = area;
+                        quad = new Quad(0, yMin, width - 1, yMin + row[oldTop] - 1);
+                    }
+                }
+                else
+                {
+                    int curTop = idxStack.Peek();
+                    width = i - curTop - 1;
+                    int area = row[oldTop] * width;
+                    if (area > maxArea)
+                    {
+                        maxArea = area;
+                        quad = new Quad(curTop + 1, yMin, i - 1, yMin + row[oldTop] - 1);
+                    }
+                }
+            }
+        }
+        return quad;  
+    }
+
+    private void DiscardMinimalQuad()
+    {
+        var quads = new List<Quad>(128);
+        for (int i = 0; i < m_quads.Count; i++)
+        {
+            var quad = m_quads[i];
+            if (quad.Area <= m_minQuad)
+            {
+                updateRawMatrixMarks(quad, false);
+            }
+            else
+            {
+                quads.Add(quad);
+            }
+        }
+        m_quads = quads;
+    }
+
+    public void Write(string path)
     {
         using (FileStream fs = new FileStream(path, FileMode.Create))
         using (StreamWriter sw = new StreamWriter(fs))
         {
             Dictionary<int, int> verts = new Dictionary<int, int>(1024);
 
-            for (int i = 0; i < m_opaques.Count; i++)
+            for (int i = 0; i < m_quads.Count; i++)
             {
-                var rect = m_opaques[i];
-                rect.xMax += 1;
-                rect.yMax += 1;
-                var key = rect.xMin << 16 | rect.yMin;
+                var quad = m_quads[i];
+                quad.xMax += 1;
+                quad.yMax += 1;
+                var key = quad.xMin << 16 | quad.yMin;
                 if (!verts.ContainsKey(key))
                 {
                     verts.Add(key, verts.Count + 1);
                 }
 
-                key = rect.xMin << 16 | rect.yMax;
+                key = quad.xMin << 16 | quad.yMax;
                 if (!verts.ContainsKey(key))
                 {
                     verts.Add(key, verts.Count + 1);
                 }
 
-                key = rect.xMax << 16 | rect.yMax;
+                key = quad.xMax << 16 | quad.yMax;
                 if (!verts.ContainsKey(key))
                 {
                     verts.Add(key, verts.Count + 1);
                 }
 
-                key = rect.xMax << 16 | rect.yMin;
+                key = quad.xMax << 16 | quad.yMin;
                 if (!verts.ContainsKey(key))
                 {
                     verts.Add(key, verts.Count + 1);
@@ -154,13 +273,13 @@ public class PixelRaw
                 sw.Write(string.Format("v {0} {1} {2}\n", x, y, 0.0f));
             }
 
-            for (int i = 0; i < m_opaques.Count; i++)
+            for (int i = 0; i < m_quads.Count; i++)
             {
-                var rect = m_opaques[i];
-                var v1 = rect.xMin << 16 | rect.yMin;
-                var v2 = rect.xMin << 16 | rect.yMax;
-                var v3 = rect.xMax << 16 | rect.yMax;
-                var v4 = rect.xMax << 16 | rect.yMin;
+                var quad = m_quads[i];
+                var v1 = quad.xMin << 16 | quad.yMin;
+                var v2 = quad.xMin << 16 | quad.yMax;
+                var v3 = quad.xMax << 16 | quad.yMax;
+                var v4 = quad.xMax << 16 | quad.yMin;
 
                 sw.Write(string.Format("f {0} {1} {2}\n", verts[v1], verts[v2], verts[v3]));
                 sw.Write(string.Format("f {0} {1} {2}\n", verts[v1], verts[v3], verts[v4]));
@@ -168,182 +287,58 @@ public class PixelRaw
         }
     }
 
-    private bool isComputeOver()
-    {
-        for (int i = 0; i < m_height; i++)
-        {
-            for (int j = 0; j < m_width; j++)
-            {
-                if (m_raws[i, j].cliped == false)
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    private void updateMatrix()
-    {
-        for (int i = m_height - 1; i >= 0; i--)
-        {
-            for (int j = 0; j < m_width; j++)
-            {
-                if (m_raws[i, j].cliped)
-                {
-                    m_matrix[i, j] = 0;
-                }
-                else
-                {
-                    if (i < m_height - 1)
-                    {
-                        m_matrix[i, j] = m_matrix[i + 1, j] + 1;
-                    }
-                    else
-                    {
-                        m_matrix[i, j] = 1;
-                    }
-                }
-            }
-        }
-    }
-
-    private void updateRaw(Rectangle rect)
-    {
-        for (int i = rect.yMin; i <= rect.yMax; i++)
-        {
-            for (int j = rect.xMin; j <= rect.xMax; j++)
-            {
-                m_raws[i, j].cliped = true;
-            }
-        }
-    }
-
-    private void ComputeOpaque()
-    {
-        updateMatrix();
-
-        List<int> listHeight = new List<int>(m_width);
-        Rectangle maxRect = null;
-        for (int i = 0; i < m_height; i++)
-        {
-            listHeight.Clear();
-            for (int j = 0; j < m_width; j++)
-            {
-                listHeight.Add(m_matrix[i, j]);
-            }
-            Rectangle rect = ComputeLargestRectangle(listHeight, i);
-            if (rect == null)
-                continue;
-
-            if (maxRect == null)
-            {
-                maxRect = rect;
-            }
-            else
-            {
-                if (rect.Area > maxRect.Area)
-                {
-                    maxRect = rect;
-                }
-            }
-        }
-
-        updateRaw(maxRect);
-        m_opaques.Add(maxRect);
-    }
-
-    private Rectangle ComputeLargestRectangle(List<int> listHeight, int yMin)   
-    {
-        Rectangle rect = null;
-        Stack<int> stkHeightIdx = new Stack<int>();
-        listHeight.Add(0);
-        int maxArea = 0 ;
-        for (int i = 0; i < listHeight.Count; )  
-        {
-            if (stkHeightIdx.Count == 0 || listHeight[i] > listHeight[stkHeightIdx.Peek()])  
-            {
-                stkHeightIdx.Push(i);
-                i++;  
-            }  
-            else  
-            {
-                int index = stkHeightIdx.Peek();
-                stkHeightIdx.Pop();
-                int w = 0;
-                if (stkHeightIdx.Count == 0)
-                {
-                    w = i;
-                    int area = listHeight[index] * w;
-                    if (area > maxArea)
-                    {
-                        maxArea = area;
-                        rect = new Rectangle(0, yMin, w - 1, yMin + listHeight[index] - 1);
-                    }
-                }
-                else
-                {
-                    w = i - stkHeightIdx.Peek() - 1;
-                    int area = listHeight[index] * w;
-                    if (area > maxArea)
-                    {
-                        maxArea = area;
-                        rect = new Rectangle(stkHeightIdx.Peek() + 1, yMin, i - 1, yMin + listHeight[index] - 1);
-                    }
-                }
-            }
-        }  
-        return rect;  
-    }
-
-    private Pixel[,]        m_raws = null;
-    private int[,]          m_matrix = null; 
+    private Item[,]         m_rawMatrix = null;
+    private int[,]          m_idxMatrix = null; 
     private int             m_width;
     private int             m_height;
-    private List<Rectangle> m_opaques = new List<Rectangle>(128);
+    private int             m_minQuad;
+    private List<Quad>      m_quads = new List<Quad>(128);
 }
 
 public class TextureToMesh
 {
-    private static void GetMaxRect(Pixel[,] mat)
-    {
-    }
-
     [MenuItem("Tools/TextureToMesh")]
     public static void Transform()
     {
-        Texture2D tex = Selection.activeObject as Texture2D;
-        PixelRaw pr1 = new PixelRaw(tex.GetPixels(), tex.width, tex.height);
-        pr1.ComputeOpaques();
-        pr1.WriteObj("Assets/test1.obj");
-        Debug.Log("a");
-        return;
-
-        Color[] colors = new Color[64];
-        colors[2 * 8 + 2] = new Color(0, 0, 0, 1);
-        colors[3 * 8 + 2] = new Color(0, 0, 0, 1);
-        colors[4 * 8 + 2] = new Color(0, 0, 0, 1);
-        colors[4 * 8 + 7] = new Color(0, 0, 0, 1);
-        colors[5 * 8 + 3] = new Color(0, 0, 0, 1);
-        colors[5 * 8 + 5] = new Color(0, 0, 0, 1);
-        colors[5 * 8 + 6] = new Color(0, 0, 0, 1);
-        colors[5 * 8 + 7] = new Color(0, 0, 0, 1);
-        colors[6 * 8 + 5] = new Color(0, 0, 0, 1);
-        colors[6 * 8 + 6] = new Color(0, 0, 0, 1);
-        colors[6 * 8 + 7] = new Color(0, 0, 0, 1);
-        colors[7 * 8 + 4] = new Color(0, 0, 0, 1);
-        colors[7 * 8 + 5] = new Color(0, 0, 0, 1);
-        colors[7 * 8 + 6] = new Color(0, 0, 0, 1);
-        colors[7 * 8 + 7] = new Color(0, 0, 0, 1);
-
-        for (int i = 0; i < 64; i++)
         {
-            colors[i] = colors[i].a == 0 ? new Color(0, 0, 0, 1) : new Color(0, 0, 0, 0);
+            Texture2D tex = Selection.activeObject as Texture2D;
+            var colors = tex.GetPixels();
+            var raw = new float[colors.Length];
+            for (int i = 0; i < colors.Length; i++)
+            {
+                raw[i] = colors[i].a;
+            }
+
+            var matrixSubset = new MatrixSubset(raw, tex.width, tex.height, 4);
+            matrixSubset.ComputeQuads();
+            matrixSubset.Write("Assets/test2.obj");
+            Debug.Log("a");
         }
 
-        PixelRaw pr = new PixelRaw(colors, 8, 8);
-        pr.ComputeOpaques();
-        pr.WriteObj("Assets/test.obj");
-        Debug.Log("a");
+        return;
+
+        {
+            var raw = new float[64];
+            raw[2 * 8 + 2] = 1.0f;
+            raw[3 * 8 + 2] = 1.0f;
+            raw[4 * 8 + 2] = 1.0f;
+            raw[4 * 8 + 7] = 1.0f;
+            raw[5 * 8 + 3] = 1.0f;
+            raw[5 * 8 + 5] = 1.0f;
+            raw[5 * 8 + 6] = 1.0f;
+            raw[5 * 8 + 7] = 1.0f;
+            raw[6 * 8 + 5] = 1.0f;
+            raw[6 * 8 + 6] = 1.0f;
+            raw[6 * 8 + 7] = 1.0f;
+            raw[7 * 8 + 4] = 1.0f;
+            raw[7 * 8 + 5] = 1.0f;
+            raw[7 * 8 + 6] = 1.0f;
+            raw[7 * 8 + 7] = 1.0f;
+
+            var matrixSubset = new MatrixSubset(raw, 8, 8, 0);
+            matrixSubset.ComputeQuads();
+            matrixSubset.Write("Assets/test.obj");
+            Debug.Log("a");
+        }
     }
 }
